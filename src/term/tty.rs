@@ -63,7 +63,7 @@ impl Cell {
 
   /// Creates a new cell out of one-indexed, half-word tty coordinates.
   fn to_tty(self) -> (u16, u16) {
-    debug_assert!(self.0 < u16::MAX as usize && self.0 < u16::MAX as usize);
+    debug_assert!(self.0 < u16::MAX as usize && self.1 < u16::MAX as usize);
     (self.0 as u16, self.1 as u16)
   }
 
@@ -153,16 +153,9 @@ pub enum Mod {
 
 /// A [`Tty`] implemented over the stdin/stdout ANSI tty.
 #[non_exhaustive]
+#[derive(Default)]
 pub struct AnsiTty {
   pub mouse_capture: bool,
-}
-
-impl Default for AnsiTty {
-  fn default() -> Self {
-    Self {
-      mouse_capture: false,
-    }
-  }
 }
 
 impl Tty for AnsiTty {
@@ -262,7 +255,7 @@ impl Tty for AnsiTty {
 
   fn write(&mut self, start: Cell, texels: &[Texel]) -> io::Result<usize> {
     use crossterm::{cursor, execute, style};
-    if texels.len() == 0 {
+    if texels.is_empty() {
       return Ok(0);
     }
 

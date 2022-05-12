@@ -163,6 +163,12 @@ impl Style {
   }
 }
 
+impl Default for Style {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
 /*impl fmt::Display for Style {
   fn fmt(self, f: mut fmt::Formatter) -> fmt::Result {
     use termion::color::*;
