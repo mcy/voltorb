@@ -1,4 +1,4 @@
-//! Simple TUI rendering engine.
+//! A texel compositor.
 
 use std::borrow::Cow;
 use std::io;
@@ -6,18 +6,16 @@ use std::iter;
 use std::mem;
 
 use crate::term::texel::Texel;
-use crate::term::tty::Cell;
-use crate::term::tty::Tty;
+use crate::term::Cell;
+use crate::term::Tty;
 
-pub struct Canvas<'tty> {
-  tty: &'tty mut dyn Tty,
-  viewport: Cell,
-  buffer: Vec<Texel>,
-}
-
+/// A layer of texels to draw as part of a rendering operation on a [`Canvas`].
 pub struct Layer<'a> {
+  /// The cell to place the upper-left corner of the layer at.
   pub origin: Cell,
+  /// The width of a row in `data`, used for computing its dimensions.
   pub stride: usize,
+  /// The texel data to render.
   pub data: Cow<'a, [Texel]>,
 }
 
@@ -32,8 +30,8 @@ impl Layer<'_> {
   }
 
   /// Computes the bounding box for all layers in `layers`, inclusive.
-  pub fn bounding_box<'b>(
-    layers: impl IntoIterator<Item = &'b Layer<'b>>,
+  pub fn bounding_box<'a>(
+    layers: impl IntoIterator<Item = &'a Layer<'a>>,
   ) -> (Cell, Cell) {
     let mut upper = Cell::from_xy(usize::MAX, usize::MAX);
     let mut lower = Cell::from_xy(0, 0);
@@ -51,27 +49,37 @@ impl Layer<'_> {
   }
 }
 
-impl<'tty> Canvas<'tty> {
-  pub fn new(tty: &'tty mut dyn Tty) -> io::Result<Self> {
-    tty.init()?;
-    let viewport = tty.viewport()?;
+/// A texel compositor.
+///
+/// A `Canvas` is a texel buffer for compositing and rendering images to a
+/// [`Tty`] in a way that avoids completely thrashing it. It is generally a bad
+/// idea to print every line in the terminal just to update a few texels.
+///
+/// A `Canvas` renders a stack of [`Layers`], which are simply blocks of
+/// texels drawn at a specific point on the terminal. They are composited first
+/// onto a memory buffer, and then only the parts that have changed relative to
+/// what's on the screen are drawn.
+pub struct Canvas {
+  viewport: Cell,
+  buffer: Vec<Texel>,
+}
+
+impl Canvas {
+  /// Creates a new `Canvas` for the viewport of the given size.
+  pub fn new(viewport: Cell) -> Self {
     let (x, y) = viewport.xy();
     let buffer = Vec::with_capacity(x * y);
-    Ok(Self {
-      tty,
-      viewport,
-      buffer,
-    })
+    Self { viewport, buffer }
   }
 
+  /// Returns the current viewport size for the `Canvas`.
   pub fn viewport(&self) -> Cell {
     self.viewport
   }
 
-  pub fn tty(&mut self) -> &mut dyn Tty {
-    self.tty
-  }
-
+  /// Applies a resize operation.
+  ///
+  /// This allocates (if necessary) a new buffer, discarding the render cache.
   pub fn winch(&mut self, viewport: Cell) {
     self.viewport = viewport;
     self.buffer.clear();
@@ -85,9 +93,15 @@ impl<'tty> Canvas<'tty> {
     }
   }
 
+  /// Renders `layers` onto `tty`.
+  ///
+  /// This function is not intended to be called on multiple different `tty`s,
+  /// since it remembers what was written the *last* time this function was
+  /// called.
   pub fn render<'a>(
     &mut self,
     layers: impl IntoIterator<Item = Layer<'a>>,
+    tty: &mut dyn Tty,
   ) -> io::Result<()> {
     let mut side_buffer;
     let (buffer, old) = if self.buffer.is_empty() {
@@ -130,17 +144,17 @@ impl<'tty> Canvas<'tty> {
 
           if same {
             let start = Cell::from_xy(last_boundary, i);
-            self.tty.write(start, &line[last_boundary..j])?;
+            tty.write(start, &line[last_boundary..j])?;
           }
           last_boundary = j;
         }
         if same_at_last_boundary {
           let start = Cell::from_xy(last_boundary, i);
-          self.tty.write(start, &line[last_boundary..])?;
+          tty.write(start, &line[last_boundary..])?;
         }
       } else {
         let start = Cell::from_xy(0, i);
-        self.tty.write(start, line)?;
+        tty.write(start, line)?;
       }
     }
 

@@ -5,11 +5,11 @@ use std::time::Duration;
 use rand::seq::SliceRandom;
 use rand::Rng;
 
-use crate::term::render::Layer;
-use crate::term::tty::Cell;
-use crate::term::tty::Event;
-use crate::term::tty::Key;
-use crate::term::tty::Mod;
+use crate::term::Cell;
+use crate::term::Event;
+use crate::term::Key;
+use crate::term::Layer;
+use crate::term::Mod;
 
 mod gfx;
 

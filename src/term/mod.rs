@@ -1,5 +1,9 @@
 //! Building blocks for the TUI.
 
-pub mod render;
+mod canvas;
+mod tty;
+
 pub mod texel;
-pub mod tty;
+
+pub use canvas::*;
+pub use tty::*;

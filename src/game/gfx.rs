@@ -6,12 +6,12 @@ use boxy as b;
 
 use crate::game::Game;
 use crate::game::Hint;
-use crate::term::render::Layer;
 use crate::term::texel::Color;
 use crate::term::texel::FromChar;
 use crate::term::texel::Style;
 use crate::term::texel::Texel;
-use crate::term::tty::Cell;
+use crate::term::Cell;
+use crate::term::Layer;
 
 // Cards are 9x5; the area that can be drawn on is 5x3, and starts
 // at the coordinate (2, 1).

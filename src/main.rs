@@ -39,50 +39,60 @@ fn main() {
     exit(1)
   }
 
-  let mut game = game::Game::new(game::Options {
-    board_dims: (opts.columns, opts.rows),
-    max_card_value: opts.max_card,
-  });
-
-  let mut tty = term::tty::AnsiTty::default();
+  let mut tty = term::AnsiTty::default();
   tty.install_panic_hook();
 
-  let mut canvas = term::render::Canvas::new(&mut tty).unwrap();
-  canvas.render(game.render(canvas.viewport())).unwrap();
+  let result = term::with_tty(&mut tty, |tty| {
+    let mut game = game::Game::new(game::Options {
+      board_dims: (opts.columns, opts.rows),
+      max_card_value: opts.max_card,
+    });
 
-  let mut wait = Some(Duration::default());
-  let mut interact = true;
-  loop {
-    let event = if interact {
-      let event = canvas.tty().poll(wait.take()).unwrap();
-      if let Some(term::tty::Event::Winch(val)) = event {
-        canvas.winch(val);
-        canvas.render(game.render(canvas.viewport())).unwrap();
-        continue;
-      }
-      event
-    } else if let Some(wait) = wait.take() {
-      std::thread::sleep(wait);
-      None
-    } else {
-      None
-    };
-    interact = true;
+    let mut viewport = tty.viewport()?;
 
-    match game.interact(event) {
-      game::Response::Quit => break,
-      game::Response::WaitForInput => {}
-      game::Response::Wait {
-        duration,
-        ignore_inputs,
-      } => {
-        wait = Some(duration);
-        interact = !ignore_inputs;
+    let mut canvas = term::Canvas::new(viewport);
+    canvas.render(game.render(viewport), tty)?;
+
+    let mut wait = Some(Duration::default());
+    let mut interact = true;
+    loop {
+      let event = if interact {
+        let event = tty.poll(wait.take())?;
+        if let Some(term::Event::Winch(vp)) = event {
+          viewport = vp;
+          canvas.winch(viewport);
+          canvas.render(game.render(viewport), tty)?;
+          continue;
+        }
+        event
+      } else {
+        if let Some(wait) = wait.take() {
+          std::thread::sleep(wait);
+        }
+        interact = true;
+        None
+      };
+
+      match game.interact(event) {
+        game::Response::Quit => break,
+        game::Response::WaitForInput => {}
+        game::Response::Wait {
+          duration,
+          ignore_inputs,
+        } => {
+          wait = Some(duration);
+          interact = !ignore_inputs;
+        }
       }
+
+      canvas.render(game.render(canvas.viewport()), tty)?;
     }
 
-    canvas.render(game.render(canvas.viewport())).unwrap();
-  }
+    tty.fini()
+  });
 
-  canvas.tty().fini().unwrap();
+  if let Err(e) = result {
+    eprintln!("error: {e}");
+    exit(1);
+  }
 }

@@ -44,6 +44,27 @@ pub trait Tty {
 }
 impl dyn Tty {} // Object safe.
 
+/// Runs `body` in a context where `tty` is usable.
+///
+/// This function makes sure to call `init` and `fini` in all paths of
+/// the function, except panicking.
+pub fn with_tty<T>(
+  tty: &mut dyn Tty,
+  body: impl FnOnce(&mut dyn Tty) -> io::Result<T>,
+) -> io::Result<T> {
+  tty.init()?;
+  match body(tty) {
+    Ok(val) => {
+      tty.fini()?;
+      Ok(val)
+    }
+    Err(e) => {
+      let _ = tty.fini();
+      Err(e)
+    }
+  }
+}
+
 /// A coordinate in a [`Tty`]'s view.
 ///
 /// Unlike Unix ttys, this function normalizes to zero indices to avoid
@@ -146,6 +167,7 @@ pub enum Key {
 #[enumflags2::bitflags]
 #[repr(u8)]
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[allow(missing_docs)]
 pub enum Mod {
   Shift,
   Ctrl,
