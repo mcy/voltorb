@@ -120,7 +120,7 @@ impl Game {
   /// Renders the current game state as a pile of layers that can be handed off
   /// to the compositor.
   pub fn render(&self, viewport: Cell) -> Vec<Layer> {
-    gfx::render(self, viewport)
+    gfx::render(self, viewport, &gfx::Stylesheet::default())
   }
 
   /// Generates a new game board in-place.

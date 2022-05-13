@@ -32,6 +32,16 @@ impl Color {
       Self::LtWhite => Color::White,
     }
   }
+
+  /// Returns a texel style with this as the foreground color.
+  pub fn fg(self) -> Style {
+    Style::new().with_fg(self)
+  }
+
+  /// Returns a texel style with this as the background color.
+  pub fn bg(self) -> Style {
+    Style::new().with_bg(self)
+  }
 }
 
 /// A character weight, ranging from light to bold.
