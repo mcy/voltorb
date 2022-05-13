@@ -33,6 +33,7 @@ fn art_index(x: usize, y: usize) -> usize {
   (x + ART_ORIGIN_WIDTH) + CARD_WIDTH * (y + ART_ORIGIN_HEIGHT)
 }
 
+#[derive(Copy, Clone)]
 pub struct Stylesheet {
   card_style: Style,
   card_weight: b::Weight,
@@ -48,6 +49,8 @@ pub struct Stylesheet {
 
   coin_style: Style,
   memo_style: Style,
+
+  hint_colors: [Style; 5],
 }
 
 impl Default for Stylesheet {
@@ -63,6 +66,13 @@ impl Default for Stylesheet {
       voltorb_wht: Color::LtWhite.fg(),
       coin_style: Color::DkYellow.fg(),
       memo_style: Color::DkYellow.fg(),
+      hint_colors: [
+        Color::DkRed.fg(),
+        Color::DkGreen.fg(),
+        Color::DkYellow.fg(),
+        Color::DkBlue.fg(),
+        Color::DkMagenta.fg(),
+      ],
     }
   }
 }
@@ -126,8 +136,10 @@ pub fn render(
     })
   }
 
-  fn make_hint(hint: Hint, sheet: &Stylesheet) -> Vec<Texel> {
-    let mut hint_art = new_card(sheet, false);
+  fn make_hint(hint: Hint, idx: usize, sheet: &Stylesheet) -> Vec<Texel> {
+    let mut sheet = *sheet;
+    sheet.card_style = sheet.hint_colors[idx % sheet.hint_colors.len()];
+    let mut hint_art = new_card(&sheet, false);
 
     // Draw the small Voltorb.
     hint_art[art_index(0, 1)] = '▄'.with_style(sheet.voltorb_red);
@@ -138,12 +150,12 @@ pub fn render(
     // Draw the bar separating the two numbers.
 
     hint_art[art_index(3, 1)] =
-      b::Char::horizontal(b::Weight::Doubled).with_style(sheet.card_style);
+      b::Char::horizontal(b::Weight::Doubled).with_style(sheet.voltorb_wht);
     hint_art[art_index(4, 1)] =
-      b::Char::horizontal(b::Weight::Doubled).with_style(sheet.card_style);
+      b::Char::horizontal(b::Weight::Doubled).with_style(sheet.voltorb_wht);
 
     for (i, tx) in sheet
-      .number_style
+      .voltorb_wht
       .texels_from_str(&format!("{:>5}", hint.sum))
       .into_iter()
       .enumerate()
@@ -171,7 +183,7 @@ pub fn render(
         CARD_HEIGHT * height + 1,
       ),
       stride: 9,
-      data: make_hint(h, sheet).into(),
+      data: make_hint(h, i, sheet).into(),
     })
   }
 
@@ -179,7 +191,7 @@ pub fn render(
     layers.push(Layer {
       origin: Cell::from_xy((CARD_WIDTH + 1) * width + 1, CARD_HEIGHT * i),
       stride: 9,
-      data: make_hint(h, sheet).into(),
+      data: make_hint(h, i, sheet).into(),
     })
   }
 
@@ -313,7 +325,6 @@ fn new_card(sheet: &Stylesheet, selected: bool) -> Vec<Texel> {
       .with_style(tx_style),
   ]
 }
-
 
 /// Draws art on a card: a backside, a Voltorb, or a number.
 fn draw_card(

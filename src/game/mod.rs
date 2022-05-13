@@ -9,6 +9,7 @@ use crate::term::render::Layer;
 use crate::term::tty::Cell;
 use crate::term::tty::Event;
 use crate::term::tty::Key;
+use crate::term::tty::Mod;
 
 mod gfx;
 
@@ -229,6 +230,13 @@ impl Game {
           ..
         }),
       ) => return Response::Quit,
+      (
+        _,
+        Some(Event::Key {
+          key: Key::Glyph('c'),
+          mods,
+        }),
+      ) if mods.contains(Mod::Ctrl) => return Response::Quit,
 
       (State::NewGame(level), _) => {
         let mut done = true;

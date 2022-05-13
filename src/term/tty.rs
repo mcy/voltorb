@@ -3,8 +3,8 @@
 
 use std::io;
 use std::io::Write as _;
-use std::time::Duration;
 use std::panic;
+use std::time::Duration;
 
 use enumflags2::BitFlags;
 
