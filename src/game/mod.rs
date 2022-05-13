@@ -1,25 +1,22 @@
 //! Game logic.
 
-use std::iter;
 use std::time::Duration;
-
-use boxy as b;
 
 use rand::seq::SliceRandom;
 use rand::Rng;
 
 use crate::term::render::Layer;
-use crate::term::texel::Color;
-use crate::term::texel::FromChar;
-use crate::term::texel::Style;
-use crate::term::texel::Texel;
-use crate::term::texel::Weight;
 use crate::term::tty::Cell;
 use crate::term::tty::Event;
 use crate::term::tty::Key;
 
+mod gfx;
+
+// Options for configuring a [`Game`].
 pub struct Options {
+  // The dimensions of the board. Values must be in `5..=8`.
   pub board_dims: (u32, u32),
+  // Maximum value for a multiplier card. Values must be in `3..=9`.
   pub max_card_value: u8,
 }
 
@@ -35,7 +32,19 @@ struct Card {
   memo: u16,
 }
 
+#[derive(Copy, Clone, Debug, Default)]
+struct Hint {
+  /// The sum of cards along a row/column.
+  sum: u32,
+  /// The number of Voltorbs in a row/column.
+  voltorbs: u32,
+}
+
+/// The big ol' game state struct.
+///
+/// This contains all state for the current game.
 pub struct Game {
+  /// Options, which determine the size of the board vectors below.
   options: Options,
 
   level: u32,
@@ -43,32 +52,53 @@ pub struct Game {
   round_score: u64,
 
   cards: Vec<Card>,
-  col_hints: Vec<(u32, u32)>,
-  row_hints: Vec<(u32, u32)>,
+  col_hints: Vec<Hint>,
+  row_hints: Vec<Hint>,
 
+  /// The index of the card currently selected by the player in `cards`.
   selected_card: usize,
+
   state: State,
 }
 
 #[derive(Clone, Copy, Debug)]
 enum State {
+  /// A new game needs to be generated. This flips all cards face down and then
+  /// generates a new game at the given level.
   NewGame(u32),
+  /// The game is currently actively being played.
   Standby,
+  /// The game is flipping over a single card to reveal it to the player.
   Flipping,
+  /// A Voltorb was just flipped over. All cards are revealed, and then a
+  /// new game starts.
   GameOver(u32),
+  /// The last multiplier was just flipped over. Proceeds immediately to a
+  /// new game.
   LevelUp,
 }
 
+/// An interaction response, instructing the main loop to do something.
+#[derive(Clone, Copy, Debug)]
 pub enum Response {
+  /// Wait some amount of time and then interact with a `None` input again.
   Wait {
+    /// The time to wait.
     duration: Duration,
+    /// If false, user input can interrupt the wait and trigger the next
+    /// interaction early.
     ignore_inputs: bool,
   },
+  /// Wait for user interaction forever.
   WaitForInput,
+  /// Clean up and quit.
   Quit,
 }
 
+const MAX_LEVEL: usize = 8;
+
 impl Game {
+  /// Create a new game state.
   pub fn new(options: Options) -> Self {
     let (x, y) = options.board_dims;
     Self {
@@ -77,8 +107,8 @@ impl Game {
       round_score: 0,
 
       cards: vec![Card::default(); (x as usize) * (y as usize)],
-      col_hints: vec![(0, 0); x as usize],
-      row_hints: vec![(0, 0); y as usize],
+      col_hints: vec![Hint::default(); x as usize],
+      row_hints: vec![Hint::default(); y as usize],
 
       selected_card: 0,
       state: State::NewGame(1),
@@ -87,34 +117,71 @@ impl Game {
     }
   }
 
-  pub fn generate_board(&mut self) {
+  /// Renders the current game state as a pile of layers that can be handed off
+  /// to the compositor.
+  pub fn render(&self, viewport: Cell) -> Vec<Layer> {
+    gfx::render(self, viewport)
+  }
+
+  /// Generates a new game board in-place.
+  ///
+  /// This function uses a formula, rather than a table like HGSS, which allows
+  /// it to be generalized to larger widths and card values. It approximates the
+  /// HGSS data for dims = 5x5 and max_card = 3, although not exactly.
+  fn generate_board(&mut self) {
     let max_card = self.options.max_card_value as u32;
     let avg_width = (self.options.board_dims.0 + self.options.board_dims.1) / 2;
-
     let mut rng = rand::thread_rng();
+
+    // The number of Voltorbs is approximately a linear function of the area,
+    // so regardless of size the Voltorbs make up a consistent fraction of the
+    // board at a particular level.
     let voltorbs = (self.cards.len() / 5 * 2)
       .min((self.level * (avg_width - 3)) as usize + self.cards.len() / 5);
 
+    // The sum of all multiplier cards is a generalization of the formula
+    // `sum := 2 * level + 9` that the HGSS data appears to follow.
+    //
+    // The level used for the computation is either `level` or `level - 1/2`,
+    // chosen at random.
     let mut sum = self.level * (max_card - 1) + 3 * max_card;
     if rng.gen::<bool>() {
       sum -= (max_card - 1) / 2;
     }
-    let maxes = [1u64, 2, 4, 8, 12, 20, 40, 80];
+
+    // Separately, we compute the maximum payout for this round; this keeps the
+    // total payout in close ranges per level.
+    //
+    // The maxes for vanilla are 50, 100, 200, 400, 600, 1000, 2000, 4000. The
+    // current formula scales a value taken from a table by a function that
+    // is approximately area**(max_card/2).
+    //
+    // For vanilla options, this degenerates to the vanilla maxes.
+    let maxes: [u64; MAX_LEVEL] = [1, 2, 4, 8, 12, 20, 40, 80];
     let max = maxes[self.level as usize - 1]
       * (1 << (max_card - 1))
       * (self.cards.len() as u64).pow(max_card / 2);
 
+    // We generate a collection of cards by selecting all card choices that
+    // would not cause the prefix product of payouts to overflow max, and pick
+    // one randomly. We subtract it from the sum, add it to the payout, and
+    // repeat.
+    //
+    // At this point, we have a game formed, so the rest of this function is
+    // just building out the relevant data structures.
     let mut cards = Vec::new();
     let mut coins = 1;
     while sum > 1 && cards.len() < self.cards.len() - voltorbs {
-      let max_candidate =
-        (2..=max_card).filter(|x| (*x as u64) * coins <= max).max();
+      let max_candidate = (2..=max_card)
+        .filter(|&x| (x as u64) * coins <= max && x < sum)
+        .max();
       if max_candidate.is_none() {
         break;
       }
 
       let value = rng.gen_range(2..=max_candidate.unwrap());
       coins *= value as u64;
+      sum -= max_candidate.unwrap();
       cards.push(value);
     }
 
@@ -122,6 +189,7 @@ impl Game {
       value: 1,
       ..Card::default()
     });
+
     let mut indices = (0usize..self.cards.len()).collect::<Vec<_>>();
     indices.shuffle(&mut rng);
     for index in &indices[0..voltorbs] {
@@ -133,22 +201,24 @@ impl Game {
     }
 
     self.round_score = 0;
-    self.row_hints.fill((0, 0));
-    self.col_hints.fill((0, 0));
+    self.row_hints.fill(Hint::default());
+    self.col_hints.fill(Hint::default());
 
     let stride = self.options.board_dims.0 as usize;
     for (i, card) in self.cards.iter().enumerate() {
-      self.row_hints[i / stride].0 += card.value as u32;
-      self.col_hints[i % stride].0 += card.value as u32;
+      self.row_hints[i / stride].sum += card.value as u32;
+      self.col_hints[i % stride].sum += card.value as u32;
       if card.value == 0 {
-        self.row_hints[i / stride].1 += 1;
-        self.col_hints[i % stride].1 += 1;
+        self.row_hints[i / stride].voltorbs += 1;
+        self.col_hints[i % stride].voltorbs += 1;
       }
     }
   }
 
-  /// Presents a player interaction to the game, indicating to the main loop
-  /// how to respond in kind.
+  /// Presents a player interaction to the game.
+  ///
+  /// This drives the internal state machine forward for the game to
+  /// respond in kind.
   pub fn interact(&mut self, event: Option<Event>) -> Response {
     let stride = self.options.board_dims.0 as usize;
     match (self.state, event) {
@@ -159,6 +229,7 @@ impl Game {
           ..
         }),
       ) => return Response::Quit,
+
       (State::NewGame(level), _) => {
         let mut done = true;
         for card in &mut self.cards {
@@ -182,10 +253,11 @@ impl Game {
           };
         }
 
-        self.level = level.max(1);
+        self.level = level.clamp(1, MAX_LEVEL as u32);
         self.generate_board();
         self.state = State::Standby;
       }
+
       (State::Standby, Some(Event::Key { key, .. })) => match key {
         Key::Left => {
           if self.selected_card % stride == 0 {
@@ -230,6 +302,7 @@ impl Game {
         }
         _ => {}
       },
+
       (State::Flipping, _) => {
         let card = &mut self.cards[self.selected_card];
         if card.flipped {
@@ -278,6 +351,7 @@ impl Game {
           ignore_inputs: true,
         };
       }
+
       (State::GameOver(level), _) => {
         let mut done = true;
         for card in &mut self.cards {
@@ -307,9 +381,10 @@ impl Game {
           ignore_inputs: false,
         };
       }
+
       (State::LevelUp, _) => {
         self.score = self.round_score;
-        self.state = State::NewGame((self.level + 1).min(8));
+        self.state = State::NewGame(self.level + 1);
         return Response::Wait {
           duration: Duration::from_secs(5),
           ignore_inputs: false,
@@ -319,506 +394,5 @@ impl Game {
     }
 
     Response::WaitForInput
-  }
-
-  pub fn render(&self, viewport: Cell) -> Vec<Layer<'static>> {
-    let mut layers = Vec::new();
-
-    let green = Style::new().with_fg(Color::LtGreen);
-    let gold = Style::new().with_fg(Color::DkYellow);
-
-    let (width, height) = self.options.board_dims;
-    let width = width as usize;
-    let height = height as usize;
-
-    // First, draw the cards.
-    for (i, card) in self.cards.iter().enumerate() {
-      // Cards are 9x5.
-      // ╭───────╮ ╭───────╮ ╭───────╮ ╭───────╮ ╭───────╮
-      // │ ╱╱╱╱╱ │ │ ╱╱╱╱╱ │ │ ╱╱╱╱╱ │ │ ╱╱╱╱╱ │ │ ╱╱╱╱╱ │
-      // │ ╱╱╱╱╱ │ │ ╱╱╱╱╱ │ │ ╱╱╱╱╱ │ │ ╱╱╱╱╱ │ │ ╱╱╱╱╱ │
-      // │ ╱╱╱╱╱ │ │ ╱╱╱╱╱ │ │ ╱╱╱╱╱ │ │ ╱╱╱╱╱ │ │ ╱╱╱╱╱ │
-      // ╰───────╯ ╰───────╯ ╰───────╯ ╰───────╯ ╰───────╯
-      let weight = if i == self.selected_card {
-        b::Weight::Doubled
-      } else {
-        b::Weight::Normal
-      };
-      let mut card_art = vec![
-        b::Char::upper_left(weight)
-          .style(b::Style::Curved)
-          .with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::upper_right(weight)
-          .style(b::Style::Curved)
-          .with_style(green),
-        //
-        b::Char::vertical(weight).with_style(green),
-        Texel::empty(),
-        '╱'.with_style(green),
-        '╱'.with_style(green),
-        '╱'.with_style(green),
-        '╱'.with_style(green),
-        '╱'.with_style(green),
-        Texel::empty(),
-        b::Char::vertical(weight).with_style(green),
-        //
-        b::Char::vertical(weight).with_style(green),
-        Texel::empty(),
-        '╱'.with_style(green),
-        '╱'.with_style(green),
-        '╱'.with_style(green),
-        '╱'.with_style(green),
-        '╱'.with_style(green),
-        Texel::empty(),
-        b::Char::vertical(weight).with_style(green),
-        //
-        b::Char::vertical(weight).with_style(green),
-        Texel::empty(),
-        '╱'.with_style(green),
-        '╱'.with_style(green),
-        '╱'.with_style(green),
-        '╱'.with_style(green),
-        '╱'.with_style(green),
-        Texel::empty(),
-        b::Char::vertical(weight).with_style(green),
-        //
-        b::Char::lower_left(weight)
-          .style(b::Style::Curved)
-          .with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::lower_right(weight)
-          .style(b::Style::Curved)
-          .with_style(green),
-      ];
-
-      // For each card, if it's been flipped, we draw the contents in the
-      // inner 5x3 box; this is either a number or a Voltorb; otherwise, we
-      // draw the memos.
-      if card.flipped {
-        draw_card(&mut card_art, card.value);
-      } else {
-        for i in 0..=9 {
-          let row = i / 3 + 1;
-          let col = i % 3 * 2 + 2;
-          let idx = col + row * 9;
-          let char = match i {
-            0 => 'o',
-            i => (b'0' + (i as u8)) as char,
-          };
-
-          if card.memo & (1 << i) != 0 {
-            card_art[idx] = Texel::new(char).with_style(gold);
-          }
-        }
-      }
-
-      if card.compress > 0 {
-        let compress = card.compress as usize;
-        for row in card_art.chunks_mut(9) {
-          row[compress] = row[0];
-          row[8 - compress] = row[8];
-          for i in 0..compress {
-            row[i] = Texel::empty();
-            row[8 - i] = Texel::empty();
-          }
-        }
-      }
-
-      layers.push(Layer {
-        origin: Cell::from_xy(10 * (i % width), 5 * (i / width)),
-        stride: 9,
-        data: card_art.into(),
-      })
-    }
-
-    fn make_hint(sum: u32, voltorbs: u32) -> Vec<Texel> {
-      let green = Style::new().with_fg(Color::LtGreen);
-      let red = Style::new().with_fg(Color::LtRed);
-      let wht = Style::new().with_fg(Color::LtWhite);
-      let blu = Style::new().with_fg(Color::LtBlue);
-      let weight = b::Weight::Normal;
-      let mut hint = vec![
-        b::Char::upper_left(weight)
-          .style(b::Style::Curved)
-          .with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::upper_right(weight)
-          .style(b::Style::Curved)
-          .with_style(green),
-        //
-        b::Char::vertical(weight).with_style(green),
-        Texel::empty(),
-        'x'.with_style(blu),
-        'x'.with_style(blu),
-        'x'.with_style(blu),
-        'x'.with_style(blu),
-        'x'.with_style(blu),
-        Texel::empty(),
-        b::Char::vertical(weight).with_style(green),
-        //
-        b::Char::vertical(weight).with_style(green),
-        Texel::empty(),
-        '▄'.with_style(red),
-        '▄'.with_style(red),
-        Texel::empty(),
-        b::Char::horizontal(b::Weight::Doubled).with_style(green),
-        b::Char::horizontal(b::Weight::Doubled).with_style(green),
-        Texel::empty(),
-        b::Char::vertical(weight).with_style(green),
-        //
-        b::Char::vertical(weight).with_style(green),
-        Texel::empty(),
-        '▀'.with_style(wht),
-        '▀'.with_style(wht),
-        Texel::empty(),
-        'x'.with_style(red),
-        'x'.with_style(red),
-        Texel::empty(),
-        b::Char::vertical(weight).with_style(green),
-        //
-        b::Char::lower_left(weight)
-          .style(b::Style::Curved)
-          .with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::horizontal(weight).with_style(green),
-        b::Char::lower_right(weight)
-          .style(b::Style::Curved)
-          .with_style(green),
-      ];
-
-      for (i, tx) in blu
-        .texels_from_str(&format!("{sum:>5}"))
-        .into_iter()
-        .enumerate()
-      {
-        hint[9 + 2 + i] = tx;
-      }
-
-      for (i, tx) in red
-        .texels_from_str(&format!("{voltorbs:>3}"))
-        .into_iter()
-        .enumerate()
-      {
-        hint[3 * 9 + 4 + i] = tx;
-      }
-
-      hint
-    }
-
-    // Next, draw the hints along each side.
-    for (i, &(sum, voltorbs)) in self.col_hints.iter().enumerate() {
-      layers.push(Layer {
-        origin: Cell::from_xy(10 * (i % width), 5 * height + 1),
-        stride: 9,
-        data: make_hint(sum, voltorbs).into(),
-      })
-    }
-
-    for (i, &(sum, voltorbs)) in self.row_hints.iter().enumerate() {
-      layers.push(Layer {
-        origin: Cell::from_xy(10 * width + 1, 5 * i),
-        stride: 9,
-        data: make_hint(sum, voltorbs).into(),
-      })
-    }
-
-    // Draw the level number.
-    let mut level = vec![Texel::empty(); 9 * 5];
-    draw_card(&mut level, self.level as u8);
-    layers.push(Layer {
-      origin: Cell::from_xy(10 * width + 1, 5 * height + 1),
-      stride: 9,
-      data: level.into(),
-    });
-
-    let width_cards_tx = 10 * (width + 1);
-
-    // Draw the controls/scoreboard.
-    let mut controls = Vec::new();
-    let bar = iter::repeat(b::Char::horizontal(b::Weight::Doubled).into_char())
-      .take(32)
-      .collect::<String>();
-    controls.extend(gold.with_weight(Weight::Bold).texels_from_str(&bar));
-    controls.extend(gold.texels_from_str(" Arrows: Move  ╱╱   0-9: Memo   "));
-    controls.extend(gold.texels_from_str(" Enter:  Flip  ╱╱   `q`: Quit   "));
-    controls.extend(gold.with_weight(Weight::Bold).texels_from_str(&bar));
-    controls.extend(
-      gold
-        .with_weight(Weight::Bold)
-        .texels_from_str("     Coins     ╱╱     Total     "),
-    );
-    controls.extend(gold.texels_from_str(&format!(
-      " {:013} ╱╱ {:013} ",
-      self.round_score, self.score
-    )));
-    controls.extend(gold.with_weight(Weight::Bold).texels_from_str(&bar));
-    layers.push(Layer {
-      origin: Cell::from_xy(width_cards_tx + 2, 0),
-      stride: 32,
-      data: controls.into(),
-    });
-
-    // Center everything.
-    let (_, lower) = Layer::bounding_box(&layers);
-    let offset_x = viewport.col().saturating_sub(lower.col()) / 2;
-    let offset_y = viewport.row().saturating_sub(lower.row()) / 2;
-
-    for layer in &mut layers {
-      layer.origin = Cell::from_xy(
-        layer.origin.col() + offset_x,
-        layer.origin.row() + offset_y,
-      );
-    }
-
-    layers
-  }
-}
-
-fn draw_card(card: &mut Vec<Texel>, n: u8) {
-  assert!(n < 10);
-  for (i, line) in card.chunks_mut(9).skip(1).take(3).enumerate() {
-    let line = &mut line[2..7];
-    let red = Style::new().with_fg(Color::LtRed);
-    let wht = Style::new().with_fg(Color::LtWhite);
-    let blu = Style::new().with_fg(Color::LtBlue);
-
-    let art = match (n, i) {
-      (0, 0) => [
-        Texel::empty(),
-        '▁'.with_style(red),
-        '▁'.with_style(red),
-        '▁'.with_style(red),
-        Texel::empty(),
-      ],
-      (0, 1) => [
-        Texel::empty(),
-        '▛'.with_style(red),
-        '█'.with_style(red),
-        '▜'.with_style(red),
-        Texel::empty(),
-      ],
-      (0, 2) => [
-        Texel::empty(),
-        '▀'.with_style(wht),
-        '▀'.with_style(wht),
-        '▀'.with_style(wht),
-        Texel::empty(),
-      ],
-      (1, 0) => [
-        Texel::empty(),
-        b::Char::right_half(b::Weight::Thick).with_style(blu),
-        b::Char::upper_right(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-        Texel::empty(),
-      ],
-      (1, 1) => [
-        Texel::empty(),
-        Texel::empty(),
-        b::Char::vertical(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-        Texel::empty(),
-      ],
-      (1, 2) => [
-        Texel::empty(),
-        b::Char::right_half(b::Weight::Thick).with_style(blu),
-        b::Char::up_tee(b::Weight::Thick).with_style(blu),
-        b::Char::left_half(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (2, 0) => [
-        Texel::empty(),
-        b::Char::upper_left(b::Weight::Thick).with_style(blu),
-        b::Char::horizontal(b::Weight::Thick).with_style(blu),
-        b::Char::upper_right(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (2, 1) => [
-        Texel::empty(),
-        b::Char::upper_left(b::Weight::Thick).with_style(blu),
-        b::Char::horizontal(b::Weight::Thick).with_style(blu),
-        b::Char::lower_right(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (2, 2) => [
-        Texel::empty(),
-        b::Char::lower_left(b::Weight::Thick).with_style(blu),
-        b::Char::horizontal(b::Weight::Thick).with_style(blu),
-        b::Char::left_half(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (3, 0) => [
-        Texel::empty(),
-        b::Char::right_half(b::Weight::Thick).with_style(blu),
-        b::Char::horizontal(b::Weight::Thick).with_style(blu),
-        b::Char::upper_right(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (3, 1) => [
-        Texel::empty(),
-        Texel::empty(),
-        b::Char::horizontal(b::Weight::Thick).with_style(blu),
-        b::Char::left_tee(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (3, 2) => [
-        Texel::empty(),
-        b::Char::right_half(b::Weight::Thick).with_style(blu),
-        b::Char::horizontal(b::Weight::Thick).with_style(blu),
-        b::Char::lower_right(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (4, 0) => [
-        Texel::empty(),
-        b::Char::down_half(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-        b::Char::down_half(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (4, 1) => [
-        Texel::empty(),
-        b::Char::lower_left(b::Weight::Thick).with_style(blu),
-        b::Char::horizontal(b::Weight::Thick).with_style(blu),
-        b::Char::cross(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (4, 2) => [
-        Texel::empty(),
-        Texel::empty(),
-        Texel::empty(),
-        b::Char::up_half(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (5, 0) => [
-        Texel::empty(),
-        b::Char::upper_left(b::Weight::Thick).with_style(blu),
-        b::Char::horizontal(b::Weight::Thick).with_style(blu),
-        b::Char::left_half(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (5, 1) => [
-        Texel::empty(),
-        b::Char::lower_left(b::Weight::Thick).with_style(blu),
-        b::Char::horizontal(b::Weight::Thick).with_style(blu),
-        b::Char::upper_right(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (5, 2) => [
-        Texel::empty(),
-        b::Char::lower_left(b::Weight::Thick).with_style(blu),
-        b::Char::horizontal(b::Weight::Thick).with_style(blu),
-        b::Char::lower_right(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (6, 0) => [
-        Texel::empty(),
-        b::Char::upper_left(b::Weight::Thick).with_style(blu),
-        b::Char::horizontal(b::Weight::Thick).with_style(blu),
-        b::Char::upper_right(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (6, 1) => [
-        Texel::empty(),
-        b::Char::right_tee(b::Weight::Thick).with_style(blu),
-        b::Char::horizontal(b::Weight::Thick).with_style(blu),
-        b::Char::upper_right(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (6, 2) => [
-        Texel::empty(),
-        b::Char::lower_left(b::Weight::Thick).with_style(blu),
-        b::Char::horizontal(b::Weight::Thick).with_style(blu),
-        b::Char::lower_right(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (7, 0) => [
-        Texel::empty(),
-        b::Char::upper_left(b::Weight::Thick).with_style(blu),
-        b::Char::horizontal(b::Weight::Thick).with_style(blu),
-        b::Char::upper_right(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (7, 1) => [
-        Texel::empty(),
-        Texel::empty(),
-        Texel::empty(),
-        b::Char::vertical(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (7, 2) => [
-        Texel::empty(),
-        Texel::empty(),
-        Texel::empty(),
-        b::Char::up_half(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (8, 0) => [
-        Texel::empty(),
-        b::Char::upper_left(b::Weight::Thick).with_style(blu),
-        b::Char::horizontal(b::Weight::Thick).with_style(blu),
-        b::Char::upper_right(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (8, 1) => [
-        Texel::empty(),
-        b::Char::right_tee(b::Weight::Thick).with_style(blu),
-        b::Char::horizontal(b::Weight::Thick).with_style(blu),
-        b::Char::left_tee(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (8, 2) => [
-        Texel::empty(),
-        b::Char::lower_left(b::Weight::Thick).with_style(blu),
-        b::Char::horizontal(b::Weight::Thick).with_style(blu),
-        b::Char::lower_right(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (9, 0) => [
-        Texel::empty(),
-        b::Char::upper_left(b::Weight::Thick).with_style(blu),
-        b::Char::horizontal(b::Weight::Thick).with_style(blu),
-        b::Char::upper_right(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (9, 1) => [
-        Texel::empty(),
-        b::Char::lower_left(b::Weight::Thick).with_style(blu),
-        b::Char::horizontal(b::Weight::Thick).with_style(blu),
-        b::Char::left_tee(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      (9, 2) => [
-        Texel::empty(),
-        Texel::empty(),
-        Texel::empty(),
-        b::Char::up_half(b::Weight::Thick).with_style(blu),
-        Texel::empty(),
-      ],
-      x => panic!("bad card data: {x:?}"),
-    };
-    line.copy_from_slice(&art);
   }
 }
