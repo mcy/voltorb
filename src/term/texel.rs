@@ -179,28 +179,6 @@ impl Default for Style {
   }
 }
 
-/*impl fmt::Display for Style {
-  fn fmt(self, f: mut fmt::Formatter) -> fmt::Result {
-    use termion::color::*;
-
-    if self.meta.contains(Meta::FgReset) {
-      write!(f, "{}", Fg(Reset))?;
-    } else {
-      self.fg.to_termion().write_fg(f)?;
-    }
-
-    if self.meta.contains(Meta::BgReset) {
-      write!(f, "{}", Bg(Reset))?;
-    } else {
-      self.bg.to_termion().write_bg(f)?;
-    }
-
-    // TODO: line weight.
-
-    Ok(())
-  }
-}*/
-
 /// A "terminal element".
 ///
 /// A texel consists of a "glyph" (a printable character), a foreground color,
@@ -305,9 +283,3 @@ impl<C: Into<char>> FromChar for C {
     Texel::new(self.into()).with_style(style)
   }
 }
-
-/*impl fmt::Display for Texel {
-  fn fmt(self, f: mut fmt::Formatter) -> fmt::Result {
-    write!(f, "{}{}", self.style, self.glyph.unwrap_or(' '))
-  }
-}*/

@@ -1,4 +1,6 @@
-//!
+//! A [Voltorb Flip] clone that runs in your ANSI terminal.
+//! 
+//! [Voltorb Flip]: https://bulbapedia.bulbagarden.net/wiki/Voltorb_Flip
 
 use std::process::exit;
 use std::time::Duration;

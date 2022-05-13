@@ -90,7 +90,7 @@ pub fn render(
 
   // First, draw the cards.
   for (i, card) in game.cards.iter().enumerate() {
-    let mut card_art = new_card(&sheet, i == game.selected_card);
+    let mut card_art = new_card(sheet, i == game.selected_card);
 
     // For each card, if it's been flipped, we draw the contents in the
     // inner 5x3 box; this is either a number or a Voltorb; otherwise, we
