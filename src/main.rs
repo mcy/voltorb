@@ -44,6 +44,8 @@ fn main() {
   });
 
   let mut tty = term::tty::AnsiTty::default();
+  tty.install_panic_hook();
+  
   let mut canvas = term::render::Canvas::new(&mut tty).unwrap();
   canvas.render(game.render(canvas.viewport())).unwrap();
 

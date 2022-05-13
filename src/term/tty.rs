@@ -4,6 +4,7 @@
 use std::io;
 use std::io::Write as _;
 use std::time::Duration;
+use std::panic;
 
 use enumflags2::BitFlags;
 
@@ -153,9 +154,23 @@ pub enum Mod {
 
 /// A [`Tty`] implemented over the stdin/stdout ANSI tty.
 #[non_exhaustive]
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct AnsiTty {
   pub mouse_capture: bool,
+}
+
+impl AnsiTty {
+  /// Installs a panic handler that reverses the alternate screen before
+  /// anything is printed.
+  pub fn install_panic_hook(&self) {
+    let hook = panic::take_hook();
+    let copy = self.clone();
+    panic::set_hook(Box::new(move |info| {
+      // Discard the error; we don't want a double panic.
+      let _ = copy.clone().fini();
+      hook(info);
+    }));
+  }
 }
 
 impl Tty for AnsiTty {
