@@ -9,6 +9,7 @@ pub mod game;
 pub mod term;
 
 /// Voltorb Flip, Goldenrod City's hottest new game of 2010.
+/// https://youtu.be/gRXcyH1JdCI
 #[derive(FromArgs)]
 struct Opts {
   /// number of columns for the game board (5 to 8)
@@ -45,7 +46,7 @@ fn main() {
 
   let mut tty = term::tty::AnsiTty::default();
   tty.install_panic_hook();
-  
+
   let mut canvas = term::render::Canvas::new(&mut tty).unwrap();
   canvas.render(game.render(canvas.viewport())).unwrap();
 
