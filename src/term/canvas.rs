@@ -55,7 +55,7 @@ impl Layer<'_> {
 /// [`Tty`] in a way that avoids completely thrashing it. It is generally a bad
 /// idea to print every line in the terminal just to update a few texels.
 ///
-/// A `Canvas` renders a stack of [`Layers`], which are simply blocks of
+/// A `Canvas` renders a stack of [`Layer`], which are simply blocks of
 /// texels drawn at a specific point on the terminal. They are composited first
 /// onto a memory buffer, and then only the parts that have changed relative to
 /// what's on the screen are drawn.

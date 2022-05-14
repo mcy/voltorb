@@ -254,6 +254,18 @@ pub fn render(
     );
   }
 
+  for (i, d) in game.debug.iter().enumerate() {
+    layers.push(Layer {
+      origin: Cell::from_xy(0, i),
+      stride: viewport.col(),
+      data: sheet
+        .voltorb_red
+        .texels_from_str(d)
+        .collect::<Vec<_>>()
+        .into(),
+    });
+  }
+
   layers
 }
 

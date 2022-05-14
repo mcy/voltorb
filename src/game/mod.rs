@@ -1,5 +1,6 @@
 //! Game logic.
 
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use rand::seq::SliceRandom;
@@ -19,6 +20,8 @@ pub struct Options {
   pub board_dims: (u32, u32),
   // Maximum value for a multiplier card. Values must be in `3..=9`.
   pub max_card_value: u8,
+  /// Enables debug output.
+  pub enable_debugging: bool,
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -60,6 +63,8 @@ pub struct Game {
   selected_card: usize,
 
   state: State,
+
+  debug: VecDeque<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -113,6 +118,7 @@ impl Game {
 
       selected_card: 0,
       state: State::NewGame(1),
+      debug: VecDeque::new(),
 
       options,
     }
@@ -122,6 +128,15 @@ impl Game {
   /// to the compositor.
   pub fn render(&self, viewport: Cell) -> Vec<Layer> {
     gfx::render(self, viewport, &gfx::Stylesheet::default())
+  }
+
+  fn debug(&mut self, val: impl FnOnce() -> String) {
+    if self.options.enable_debugging {
+      if self.debug.len() == 16 {
+        let _ = self.debug.pop_front();
+      }
+      self.debug.push_back(val());
+    }
   }
 
   /// Generates a new game board in-place.
@@ -134,11 +149,15 @@ impl Game {
     let avg_width = (self.options.board_dims.0 + self.options.board_dims.1) / 2;
     let mut rng = rand::thread_rng();
 
+    self.debug(|| format!("generating new game..."));
+    self.debug(|| format!("avg_width: {avg_width}"));
+
     // The number of Voltorbs is approximately a linear function of the area,
     // so regardless of size the Voltorbs make up a consistent fraction of the
     // board at a particular level.
     let voltorbs = (self.cards.len() / 5 * 2)
       .min((self.level * (avg_width - 3)) as usize + self.cards.len() / 5);
+    self.debug(|| format!("voltorbs: {voltorbs}"));
 
     // The sum of all multiplier cards is a generalization of the formula
     // `sum := 2 * level + 9` that the HGSS data appears to follow.
@@ -149,6 +168,7 @@ impl Game {
     if rng.gen::<bool>() {
       sum -= (max_card - 1) / 2;
     }
+    self.debug(|| format!("sum: {sum}"));
 
     // Separately, we compute the maximum payout for this round; this keeps the
     // total payout in close ranges per level.
@@ -160,8 +180,9 @@ impl Game {
     // For vanilla options, this degenerates to the vanilla maxes.
     let maxes: [u64; MAX_LEVEL] = [1, 2, 4, 8, 12, 20, 40, 80];
     let max = maxes[self.level as usize - 1]
-      * (1 << (max_card - 1))
+      * (1 << (max_card - 2))
       * (self.cards.len() as u64).pow(max_card / 2);
+    self.debug(|| format!("max: {max}"));
 
     // We generate a collection of cards by selecting all card choices that
     // would not cause the prefix product of payouts to overflow max, and pick
@@ -182,9 +203,11 @@ impl Game {
 
       let value = rng.gen_range(2..=max_candidate.unwrap());
       coins *= value as u64;
-      sum -= max_candidate.unwrap();
+      sum -= value;
       cards.push(value);
     }
+    self.debug(|| format!("cards: {cards:?}"));
+    self.debug(|| format!("coins: {coins}"));
 
     self.cards.fill(Card {
       value: 1,
@@ -193,9 +216,17 @@ impl Game {
 
     let mut indices = (0usize..self.cards.len()).collect::<Vec<_>>();
     indices.shuffle(&mut rng);
-    for index in &indices[0..voltorbs] {
+
+    self.debug(|| format!("voltorbs: {:?}", &indices[..voltorbs]));
+    for index in &indices[..voltorbs] {
       self.cards[*index].value = 0;
     }
+
+    self.debug(|| {
+      let zip = Iterator::zip(indices[voltorbs..].iter(), cards.iter());
+      let pairs = zip.map(|(i, c)| format!("{i}: {c}")).collect::<Vec<_>>();
+      format!("cards: {{{}}}", pairs.join(", "))
+    });
     for (index, card) in Iterator::zip(indices[voltorbs..].iter(), cards.iter())
     {
       self.cards[*index].value = *card as u8;
@@ -308,6 +339,20 @@ impl Game {
           let index = k as u8 - b'0';
           self.cards[self.selected_card].memo ^= 1 << index;
         }
+        Key::PageUp if self.options.enable_debugging => {
+          self.state = State::LevelUp;
+          return Response::Wait {
+            duration: Duration::default(),
+            ignore_inputs: false,
+          };
+        }
+        Key::PageDown if self.options.enable_debugging => {
+          self.state = State::GameOver(self.level - 1);
+          return Response::Wait {
+            duration: Duration::default(),
+            ignore_inputs: false,
+          };
+        }
         _ => {}
       },
 
@@ -360,7 +405,7 @@ impl Game {
         };
       }
 
-      (State::GameOver(level), _) => {
+      (State::GameOver(..) | State::LevelUp, _) => {
         let mut done = true;
         for card in &mut self.cards {
           if card.flipped && card.compress > 0 {
@@ -383,16 +428,17 @@ impl Game {
           };
         }
 
-        self.state = State::NewGame(level);
-        return Response::Wait {
-          duration: Duration::from_secs(5),
-          ignore_inputs: false,
-        };
-      }
+        if let State::GameOver(level) = self.state {
+          self.state = State::NewGame(level);
+        } else {
+          self.score += self.round_score;
+          self.state = State::NewGame(self.level + 1);
+          return Response::Wait {
+            duration: Duration::from_secs(5),
+            ignore_inputs: false,
+          };
+        }
 
-      (State::LevelUp, _) => {
-        self.score = self.round_score;
-        self.state = State::NewGame(self.level + 1);
         return Response::Wait {
           duration: Duration::from_secs(5),
           ignore_inputs: false,

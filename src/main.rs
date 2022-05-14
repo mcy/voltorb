@@ -1,5 +1,5 @@
 //! A [Voltorb Flip] clone that runs in your ANSI terminal.
-//! 
+//!
 //! [Voltorb Flip]: https://bulbapedia.bulbagarden.net/wiki/Voltorb_Flip
 
 use std::process::exit;
@@ -11,7 +11,7 @@ pub mod game;
 pub mod term;
 
 /// Voltorb Flip, Goldenrod City's hottest new game of 2010.
-/// https://youtu.be/gRXcyH1JdCI
+/// <https://youtu.be/gRXcyH1JdCI>
 #[derive(FromArgs)]
 struct Opts {
   /// number of columns for the game board (5 to 8)
@@ -48,6 +48,8 @@ fn main() {
     let mut game = game::Game::new(game::Options {
       board_dims: (opts.columns, opts.rows),
       max_card_value: opts.max_card,
+      enable_debugging: cfg!(debug_assertions)
+        && std::env::var("VOLTORB_DEBUG").is_ok(),
     });
 
     let mut viewport = tty.viewport()?;

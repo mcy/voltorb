@@ -1,4 +1,5 @@
-/// "Terminal elements" or texels, analogous to a pixel or voxel.
+//! "Terminal elements" or texels, analogous to a pixel or voxel.
+
 use enumflags2::BitFlags;
 
 /// A character color, representing the standard ANSI colors.
