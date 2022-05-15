@@ -122,6 +122,10 @@ impl Canvas {
       let src_iter = l.data.chunks(l.stride);
       let dst_iter = buffer.chunks_mut(x).skip(oy);
       for (dst, src) in Iterator::zip(dst_iter, src_iter) {
+        if dst.len() < ox {
+          continue;
+        }
+
         for (dst, src) in Iterator::zip(dst[ox..].iter_mut(), src) {
           if src.glyph().is_some() {
             *dst = *src;
