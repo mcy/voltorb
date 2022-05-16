@@ -75,7 +75,7 @@ enum State {
   /// The game is currently actively being played.
   Standby,
   /// The game is flipping over a single card to reveal it to the player.
-  Flipping,
+  Flipping { slow: bool },
   /// A Voltorb was just flipped over. All cards are revealed, and then a
   /// new game starts.
   GameOver(u32),
@@ -252,6 +252,11 @@ impl Game {
   /// This drives the internal state machine forward for the game to
   /// respond in kind.
   pub fn interact(&mut self, event: Option<Event>) -> Response {
+    const FAST_FLIP: Duration = Duration::from_millis(10);
+    const SLOW_FLIP: Duration = Duration::from_millis(400);
+    let state = self.state;
+    self.debug(|| format!("interact: {state:?}, {event:?}"));
+
     let stride = self.options.board_dims.0 as usize;
     match (self.state, event) {
       (
@@ -287,7 +292,7 @@ impl Game {
         }
         if !done {
           return Response::Wait {
-            duration: Duration::from_millis(10),
+            duration: FAST_FLIP,
             ignore_inputs: true,
           };
         }
@@ -325,12 +330,22 @@ impl Game {
             self.selected_card %= stride;
           }
         }
-        Key::Enter => {
+        Key::Enter | Key::Glyph('\\')
+          if key == Key::Enter || self.options.enable_debugging =>
+        {
           if !self.cards[self.selected_card].flipped {
-            self.state = State::Flipping;
+            // If only one card remains to be flipped, make this a slow flip
+            // 10% of the time.
+            //
+            // In debug mode, \ will do this too..
+            let remaining = self.cards.iter().filter(|c| c.value > 1).count();
+            let slow = (remaining == 1 && rand::thread_rng().gen_bool(0.1))
+              || key != Key::Enter;
+
+            self.state = State::Flipping { slow };
             self.cards[self.selected_card].compress += 1;
             return Response::Wait {
-              duration: Duration::from_millis(10),
+              duration: if slow { SLOW_FLIP } else { FAST_FLIP },
               ignore_inputs: true,
             };
           }
@@ -356,7 +371,7 @@ impl Game {
         _ => {}
       },
 
-      (State::Flipping, _) => {
+      (State::Flipping { slow }, _) => {
         let card = &mut self.cards[self.selected_card];
         if card.flipped {
           card.compress -= 1;
@@ -385,7 +400,7 @@ impl Game {
             {
               self.state = State::LevelUp;
               return Response::Wait {
-                duration: Duration::from_millis(500),
+                duration: Duration::from_millis(50),
                 ignore_inputs: false,
               };
             }
@@ -400,7 +415,11 @@ impl Game {
           }
         }
         return Response::Wait {
-          duration: Duration::from_millis(10),
+          duration: if (card.flipped && card.compress < 4) || !slow {
+            FAST_FLIP
+          } else {
+            SLOW_FLIP
+          },
           ignore_inputs: true,
         };
       }
@@ -423,7 +442,7 @@ impl Game {
         }
         if !done {
           return Response::Wait {
-            duration: Duration::from_millis(10),
+            duration: FAST_FLIP,
             ignore_inputs: true,
           };
         }

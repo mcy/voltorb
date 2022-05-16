@@ -101,6 +101,7 @@ pub fn render(
       i == game.selected_card,
       sheet,
     );
+
     if card.flipped {
       for i in 0..=9 {
         if card.memo & (1 << i) != 0 {
@@ -133,7 +134,23 @@ pub fn render(
       ),
       stride: CARD_WIDTH,
       data: card_art.into(),
-    })
+    });
+
+    // In debug mode, draw the zero-index of the card in the corner.
+    if game.options.enable_debugging {
+      layers.push(Layer {
+        origin: Cell::from_xy(
+          (CARD_WIDTH + 1) * (i % width) + CARD_WIDTH - 2,
+          CARD_HEIGHT * (i / width) + CARD_HEIGHT - 1,
+        ),
+        stride: 2,
+        data: sheet
+          .memo_style
+          .texels_from_str(&format!("{:02}", i))
+          .collect::<Vec<_>>()
+          .into(),
+      });
+    }
   }
 
   fn make_hint(hint: Hint, idx: usize, sheet: &Stylesheet) -> Vec<Texel> {
