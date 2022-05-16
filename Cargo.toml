@@ -3,6 +3,13 @@ name = "voltorb"
 version = "0.1.0"
 edition = "2021"
 
+authors = ["Miguel Young de la Sota <mcyoung@mit.edu>"]
+description = "Voltorb Flip in your terminal!"
+homepage = "https://github.com/mcy/voltorb"
+repository = "https://github.com/mcy/voltorb"
+
+license = "Apache-2.0"
+
 [dependencies]
 argh = "0.1.7"
 boxy = "0.1.0"

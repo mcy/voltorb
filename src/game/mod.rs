@@ -149,7 +149,7 @@ impl Game {
     let avg_width = (self.options.board_dims.0 + self.options.board_dims.1) / 2;
     let mut rng = rand::thread_rng();
 
-    self.debug(|| format!("generating new game..."));
+    self.debug(|| "generating new game...".to_string());
     self.debug(|| format!("avg_width: {avg_width}"));
 
     // The number of Voltorbs is approximately a linear function of the area,
