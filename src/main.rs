@@ -4,6 +4,7 @@
 
 use std::process::exit;
 use std::time::Duration;
+use std::time::Instant;
 
 use argh::FromArgs;
 
@@ -23,6 +24,9 @@ struct Opts {
   /// maximum card number (3 to 9)
   #[argh(option, short = 'm', default = "3")]
   max_card: u8,
+  /// frames-per-second to run the game at
+  #[argh(option, short = 'f', default = "30")]
+  fps: u32,
 }
 
 fn main() {
@@ -40,6 +44,10 @@ fn main() {
     eprintln!("error: --max-card must be between 3 and 9");
     exit(1)
   }
+  if !(15..=120).contains(&opts.fps) {
+    eprintln!("error: --fps must be between 15 and 120");
+    exit(1)
+  }
 
   let mut tty = term::AnsiTty::default();
   tty.install_panic_hook();
@@ -52,44 +60,23 @@ fn main() {
         && std::env::var("VOLTORB_DEBUG").is_ok(),
     });
 
-    let mut viewport = tty.viewport()?;
+    let mut canvas = term::Canvas::new(tty.viewport()?);
 
-    let mut canvas = term::Canvas::new(viewport);
-    canvas.render(game.render(viewport), tty)?;
-
-    let mut wait = Some(Duration::default());
-    let mut interact = true;
+    let mut event = None;
     loop {
-      let event = if interact {
-        let event = tty.poll(wait.take())?;
-        if let Some(term::Event::Winch(vp)) = event {
-          viewport = vp;
-          canvas.winch(viewport);
-          canvas.render(game.render(viewport), tty)?;
-          continue;
-        }
-        event
-      } else {
-        if let Some(wait) = wait.take() {
-          std::thread::sleep(wait);
-        }
-        interact = true;
-        None
-      };
-
-      match game.interact(event) {
-        game::Response::Quit => break,
-        game::Response::WaitForInput => {}
-        game::Response::Wait {
-          duration,
-          ignore_inputs,
-        } => {
-          wait = Some(duration);
-          interact = !ignore_inputs;
-        }
+      let frame_timer = Instant::now();
+      if let Some(term::Event::Winch(vp)) = event {
+        canvas.winch(vp);
+        event = None;
       }
-
+      if !game.interact(event) {
+        break;
+      }
       canvas.render(game.render(canvas.viewport()), tty)?;
+
+      let timeout = Duration::from_secs_f64(1.0 / opts.fps as f64)
+        .saturating_sub(frame_timer.elapsed());
+      event = tty.poll(Some(timeout))?;
     }
 
     tty.fini()
