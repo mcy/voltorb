@@ -1,7 +1,6 @@
 //! Game logic.
 
 use std::collections::VecDeque;
-use std::time::Duration;
 
 use rand::seq::SliceRandom;
 use rand::Rng;
@@ -30,8 +29,6 @@ struct Card {
   value: u8,
   /// Whether this card has been flipped.
   flipped: bool,
-  /// By how many texels on each side to compress the card (for flipping).
-  compress: u8,
   /// Which memo values have been set by the player for this card.
   memo: u16,
 }
@@ -42,6 +39,14 @@ struct Hint {
   sum: u32,
   /// The number of Voltorbs in a row/column.
   voltorbs: u32,
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+struct Wait {
+  /// The number of frames to wait.
+  wait_for: u64,
+  /// If true, any input will end the wait instead of being ignored.
+  input_ends_wait: bool,
 }
 
 /// The big ol' game state struct.
@@ -61,44 +66,35 @@ pub struct Game {
 
   /// The index of the card currently selected by the player in `cards`.
   selected_card: usize,
-
+  frame_num: u64,
   state: State,
+  /// Whether to wait, preempting game logic for some number of frames.
+  waits: Vec<Wait>,
+
+  /// Bitset of which cards are currently flipping. Cards will animate towards
+  /// the value of `flipped`, i.e., a card with `flipped` set will appear to
+  /// flip face-up.
+  cards_flipping: u64,
+  /// The frame cards have been flipping since, if any. Cards can only flip
+  /// in batches.
+  flipping_since: u64,
+  /// The number of frames between each frame of flipping.
+  frames_per_flip_step: u64,
 
   debug: VecDeque<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
 enum State {
-  /// A new game needs to be generated. This flips all cards face down and then
-  /// generates a new game at the given level.
-  NewGame(u32),
+  /// A new game needs to be generated.
+  NewGame,
   /// The game is currently actively being played.
   Standby,
-  /// The game is flipping over a single card to reveal it to the player.
-  Flipping { slow: bool },
-  /// A Voltorb was just flipped over. All cards are revealed, and then a
-  /// new game starts.
-  GameOver(u32),
-  /// The last multiplier was just flipped over. Proceeds immediately to a
-  /// new game.
-  LevelUp,
-}
-
-/// An interaction response, instructing the main loop to do something.
-#[derive(Clone, Copy, Debug)]
-pub enum Response {
-  /// Wait some amount of time and then interact with a `None` input again.
-  Wait {
-    /// The time to wait.
-    duration: Duration,
-    /// If false, user input can interrupt the wait and trigger the next
-    /// interaction early.
-    ignore_inputs: bool,
-  },
-  /// Wait for user interaction forever.
-  WaitForInput,
-  /// Clean up and quit.
-  Quit,
+  /// Check the result of a card getting flipped over.
+  FlipCheck,
+  /// Indicates that a game ended; this does scoring and proceeds to
+  /// NewGame.
+  GameOver { new_level: u32, win: bool },
 }
 
 const MAX_LEVEL: usize = 8;
@@ -117,8 +113,14 @@ impl Game {
       row_hints: vec![Hint::default(); y as usize],
 
       selected_card: 0,
-      state: State::NewGame(1),
+      state: State::NewGame,
       debug: VecDeque::new(),
+      waits: Vec::new(),
+
+      frame_num: 0,
+      cards_flipping: 0,
+      flipping_since: 0,
+      frames_per_flip_step: 1,
 
       options,
     }
@@ -247,62 +249,74 @@ impl Game {
     }
   }
 
+  fn flip_all(&mut self, flipped: bool) {
+    let mut cards_flipping = 0;
+    for (i, card) in self.cards.iter_mut().enumerate() {
+      if card.flipped != flipped {
+        cards_flipping |= 1 << i;
+      }
+      card.flipped = flipped;
+    }
+
+    self.frames_per_flip_step = 1;
+    self.cards_flipping = cards_flipping;
+    self.flipping_since = self.frame_num;
+    self.waits.push(Wait {
+      wait_for: gfx::CARD_WIDTH as u64,
+      input_ends_wait: false,
+    });
+  }
+
+  fn flip_selected(&mut self, flipped: bool, slow: bool) {
+    self.cards[self.selected_card].flipped = flipped;
+
+    self.frames_per_flip_step = if slow { 10 } else { 1 };
+    self.cards_flipping = 1 << self.selected_card;
+    self.flipping_since = self.frame_num;
+    self.waits.push(Wait {
+      wait_for: self.frames_per_flip_step * (gfx::CARD_WIDTH / 2 + 1) as u64
+        + gfx::CARD_WIDTH as u64,
+      input_ends_wait: false,
+    });
+  }
+
   /// Presents a player interaction to the game.
   ///
-  /// This drives the internal state machine forward for the game to
-  /// respond in kind.
-  pub fn interact(&mut self, event: Option<Event>) -> Response {
-    const FAST_FLIP: Duration = Duration::from_millis(10);
-    const SLOW_FLIP: Duration = Duration::from_millis(400);
-    let state = self.state;
-    self.debug(|| format!("interact: {state:?}, {event:?}"));
-
+  /// Returns whether the game loop should continue.
+  pub fn interact(&mut self, event: Option<Event>) -> bool {
+    self.frame_num += 1;
     let stride = self.options.board_dims.0 as usize;
+    if event.is_some() {
+      let state = self.state;
+      let frame_num = self.frame_num;
+      self.debug(|| format!("interact: {frame_num}, {state:?}, {event:?}"));
+    }
+
+    if matches!(event, Some(Event::Key { key: Key::Glyph('c' | 'C'), mods}) if mods.contains(Mod::Ctrl))
+    {
+      return false;
+    }
+
+    if let Some(wait) = self.waits.first_mut() {
+      if wait.wait_for == 0 || (wait.input_ends_wait && event.is_some()) {
+        self.waits.remove(0);
+        if !self.waits.is_empty() {
+          return true;
+        }
+      } else {
+        wait.wait_for -= 1;
+        return true;
+      }
+    }
+
     match (self.state, event) {
-      (
-        _,
-        Some(Event::Key {
-          key: Key::Glyph('q'),
-          ..
-        }),
-      ) => return Response::Quit,
-      (
-        _,
-        Some(Event::Key {
-          key: Key::Glyph('c'),
-          mods,
-        }),
-      ) if mods.contains(Mod::Ctrl) => return Response::Quit,
-
-      (State::NewGame(level), _) => {
-        let mut done = true;
-        for card in &mut self.cards {
-          if !card.flipped && card.compress > 0 {
-            card.compress -= 1;
-            if card.compress != 0 {
-              done = false;
-            }
-          } else if card.flipped {
-            card.compress += 1;
-            if card.compress == 4 {
-              card.flipped = false;
-            }
-            done = false;
-          }
-        }
-        if !done {
-          return Response::Wait {
-            duration: FAST_FLIP,
-            ignore_inputs: true,
-          };
-        }
-
-        self.level = level.clamp(1, MAX_LEVEL as u32);
+      (State::NewGame, _) => {
         self.generate_board();
         self.state = State::Standby;
       }
 
       (State::Standby, Some(Event::Key { key, .. })) => match key {
+        Key::Glyph('q' | 'Q') => return false,
         Key::Left => {
           if self.selected_card % stride == 0 {
             self.selected_card += stride - 1;
@@ -342,12 +356,8 @@ impl Game {
             let slow = (remaining == 1 && rand::thread_rng().gen_bool(0.1))
               || key != Key::Enter;
 
-            self.state = State::Flipping { slow };
-            self.cards[self.selected_card].compress += 1;
-            return Response::Wait {
-              duration: if slow { SLOW_FLIP } else { FAST_FLIP },
-              ignore_inputs: true,
-            };
+            self.state = State::FlipCheck;
+            self.flip_selected(true, slow);
           }
         }
         Key::Glyph(k @ '0'..='9') => {
@@ -355,117 +365,73 @@ impl Game {
           self.cards[self.selected_card].memo ^= 1 << index;
         }
         Key::PageUp if self.options.enable_debugging => {
-          self.state = State::LevelUp;
-          return Response::Wait {
-            duration: Duration::default(),
-            ignore_inputs: false,
+          self.state = State::GameOver {
+            new_level: self.level + 1,
+            win: true,
           };
         }
         Key::PageDown if self.options.enable_debugging => {
-          self.state = State::GameOver(self.level - 1);
-          return Response::Wait {
-            duration: Duration::default(),
-            ignore_inputs: false,
+          self.state = State::GameOver {
+            new_level: self.level - 1,
+            win: false,
           };
         }
         _ => {}
       },
 
-      (State::Flipping { slow }, _) => {
+      (State::FlipCheck, _) => {
         let card = &mut self.cards[self.selected_card];
-        if card.flipped {
-          card.compress -= 1;
-          if card.compress == 0 {
-            // Resolve actual game logic now that the flip has happened.
-            if card.value == 0 {
-              let flipped = self.cards.iter().filter(|x| x.flipped).count();
-              self.state =
-                State::GameOver((flipped as u32 - 1).min(self.level));
-              return Response::Wait {
-                duration: Duration::from_millis(500),
-                ignore_inputs: false,
-              };
-            }
-
-            if self.round_score == 0 {
-              self.round_score = 1;
-            }
-            self.round_score *= card.value as u64;
-
-            // Check if we've won.
-            if !self
-              .cards
-              .iter()
-              .any(|card| card.value > 1 && !card.flipped)
-            {
-              self.state = State::LevelUp;
-              return Response::Wait {
-                duration: Duration::from_millis(50),
-                ignore_inputs: false,
-              };
-            }
-
-            self.state = State::Standby;
-            return Response::WaitForInput;
-          }
-        } else {
-          card.compress += 1;
-          if card.compress == 4 {
-            card.flipped = true;
-          }
+        if card.value == 0 {
+          let flipped = self.cards.iter().filter(|x| x.flipped).count();
+          self.state = State::GameOver {
+            new_level: (flipped as u32 - 1).min(self.level),
+            win: false,
+          };
+          self.flip_all(true);
+          self.waits.push(Wait {
+            wait_for: 30 * 5,
+            input_ends_wait: true,
+          });
+          return true;
         }
-        return Response::Wait {
-          duration: if (card.flipped && card.compress < 4) || !slow {
-            FAST_FLIP
-          } else {
-            SLOW_FLIP
-          },
-          ignore_inputs: true,
-        };
+
+        if self.round_score == 0 {
+          self.round_score = 1;
+        }
+        self.round_score *= card.value as u64;
+
+        // Check if we've won.
+        if !self
+          .cards
+          .iter()
+          .any(|card| card.value > 1 && !card.flipped)
+        {
+          self.state = State::GameOver {
+            new_level: self.level + 1,
+            win: true,
+          };
+          self.flip_all(true);
+          self.waits.push(Wait {
+            wait_for: 30 * 5,
+            input_ends_wait: true,
+          });
+          return true;
+        }
+
+        self.state = State::Standby;
       }
 
-      (State::GameOver(..) | State::LevelUp, _) => {
-        let mut done = true;
-        for card in &mut self.cards {
-          if card.flipped && card.compress > 0 {
-            card.compress -= 1;
-            if card.compress != 0 {
-              done = false;
-            }
-          } else if !card.flipped {
-            card.compress += 1;
-            if card.compress == 4 {
-              card.flipped = true;
-            }
-            done = false;
-          }
-        }
-        if !done {
-          return Response::Wait {
-            duration: FAST_FLIP,
-            ignore_inputs: true,
-          };
-        }
-
-        if let State::GameOver(level) = self.state {
-          self.state = State::NewGame(level);
-        } else {
+      (State::GameOver { new_level, win }, _) => {
+        if win {
           self.score += self.round_score;
-          self.state = State::NewGame(self.level + 1);
-          return Response::Wait {
-            duration: Duration::from_secs(5),
-            ignore_inputs: false,
-          };
         }
-
-        return Response::Wait {
-          duration: Duration::from_secs(5),
-          ignore_inputs: false,
-        };
+        self.level = new_level.clamp(1, MAX_LEVEL as u32);
+        self.flip_all(false);
+        self.state = State::NewGame;
       }
       _ => {}
     }
 
-    Response::WaitForInput
+    true
   }
 }

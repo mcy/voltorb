@@ -20,8 +20,8 @@ use crate::term::Layer;
 // │ ╱╱╱╱╱ │ │ ╱╱╱╱╱ │ │ ╱╱╱╱╱ │ │ ╱╱╱╱╱ │ │ ╱╱╱╱╱ │
 // │ ╱╱╱╱╱ │ │ ╱╱╱╱╱ │ │ ╱╱╱╱╱ │ │ ╱╱╱╱╱ │ │ ╱╱╱╱╱ │
 // ╰───────╯ ╰───────╯ ╰───────╯ ╰───────╯ ╰───────╯
-const CARD_WIDTH: usize = 9;
-const CARD_HEIGHT: usize = 5;
+pub const CARD_WIDTH: usize = 9;
+pub const CARD_HEIGHT: usize = 5;
 const ART_ORIGIN_WIDTH: usize = 2;
 const ART_ORIGIN_HEIGHT: usize = 1;
 const ART_WIDTH: usize = CARD_WIDTH - ART_ORIGIN_WIDTH * 2;
@@ -92,17 +92,32 @@ pub fn render(
   for (i, card) in game.cards.iter().enumerate() {
     let mut card_art = new_card(sheet, i == game.selected_card);
 
+    let frames_since = game.frame_num - game.flipping_since;
+    let flip_stage = if frames_since / game.frames_per_flip_step > 4 {
+      frames_since - game.frames_per_flip_step * 5 + 4
+    } else {
+      frames_since / game.frames_per_flip_step
+    };
+    let is_flipping = game.flipping_since > 0
+      && game.cards_flipping & (1 << i) != 0
+      && flip_stage < CARD_WIDTH as u64;
+
+    let mut should_draw_face = card.flipped;
+    if is_flipping && flip_stage < 5 {
+      should_draw_face ^= true;
+    }
+
     // For each card, if it's been flipped, we draw the contents in the
     // inner 5x3 box; this is either a number or a Voltorb; otherwise, we
     // draw the memos.
     draw_card(
       &mut card_art,
-      card.flipped.then(|| card.value),
+      should_draw_face.then(|| card.value),
       i == game.selected_card,
       sheet,
     );
 
-    if card.flipped {
+    if !should_draw_face {
       for i in 0..=9 {
         if card.memo & (1 << i) != 0 {
           let c = match i {
@@ -115,12 +130,16 @@ pub fn render(
       }
     }
 
-    if card.compress > 0 {
-      let compress = card.compress as usize;
+    if is_flipping {
+      let compress_by = if flip_stage >= 4 {
+        8 - flip_stage
+      } else {
+        flip_stage
+      } as usize;
       for row in card_art.chunks_mut(CARD_WIDTH) {
-        row[compress] = row[0];
-        row[CARD_WIDTH - compress - 1] = row[CARD_WIDTH - 1];
-        for i in 0..compress {
+        row[compress_by] = row[0];
+        row[CARD_WIDTH - compress_by - 1] = row[CARD_WIDTH - 1];
+        for i in 0..compress_by {
           row[i] = Texel::empty();
           row[CARD_WIDTH - i - 1] = Texel::empty();
         }
